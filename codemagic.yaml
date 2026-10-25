@@ -1,0 +1,96 @@
+workflows:
+  halaqati-android:
+    name: بناء تطبيق حلقاتي - أندرويد
+    max_build_duration: 60
+    environment:
+      node: 20
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: تثبيت الحزم
+        script: npm install
+
+      - name: تنزيل كل المكتبات والخط محلياً لضمان عمل التطبيق دون إنترنت بالكامل
+        script: |
+          mkdir -p www/vendor/fonts
+          curl -sL https://unpkg.com/react@18.2.0/umd/react.production.min.js -o www/vendor/react.production.min.js
+          curl -sL https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js -o www/vendor/react-dom.production.min.js
+          curl -sL https://unpkg.com/@babel/standalone@7.23.0/babel.min.js -o www/vendor/babel.min.js
+          curl -sL https://unpkg.com/lucide@0.292.0 -o www/vendor/lucide.js
+          curl -sL https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js -o www/vendor/html2canvas.min.js
+          curl -sL https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js -o www/vendor/jspdf.umd.min.js
+
+          # تنزيل ملفات خط Tajawal مباشرة من مستودع جوجل الرسمي للخطوط (رابط ثابت لا يعتمد على
+          # الاستنتاج من استجابة CSS ديناميكية، وهو أكثر طريقة موثوقة وثابتة للحصول على الخط)
+          mkdir -p www/vendor/fonts
+          FONTS_BASE="https://raw.githubusercontent.com/google/fonts/main/ofl/tajawal"
+          curl -sL "$FONTS_BASE/Tajawal-Regular.ttf"   -o www/vendor/fonts/tajawal-400.ttf
+          curl -sL "$FONTS_BASE/Tajawal-Medium.ttf"    -o www/vendor/fonts/tajawal-500.ttf
+          curl -sL "$FONTS_BASE/Tajawal-Bold.ttf"      -o www/vendor/fonts/tajawal-700.ttf
+          curl -sL "$FONTS_BASE/Tajawal-Black.ttf"     -o www/vendor/fonts/tajawal-900.ttf
+
+          cat > www/vendor/tajawal.css << 'CSSEOF'
+          @font-face { font-family: 'Tajawal'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/tajawal-400.ttf') format('truetype'); }
+          @font-face { font-family: 'Tajawal'; font-style: normal; font-weight: 500; font-display: swap; src: url('fonts/tajawal-500.ttf') format('truetype'); }
+          @font-face { font-family: 'Tajawal'; font-style: normal; font-weight: 700; font-display: swap; src: url('fonts/tajawal-700.ttf') format('truetype'); }
+          @font-face { font-family: 'Tajawal'; font-style: normal; font-weight: 900; font-display: swap; src: url('fonts/tajawal-900.ttf') format('truetype'); }
+          CSSEOF
+
+      - name: توليد ملف Tailwind CSS ثابت وقت البناء (بدل تشغيله كسكربت وقت فتح التطبيق - أضمن وأكثر استقراراً)
+        script: |
+          npm install -D tailwindcss@3.4.17
+          npx tailwindcss -i ./tailwind-input.css -o ./www/vendor/tailwind-built.css --minify
+
+      - name: التحقق من نجاح تنزيل كل الملفات (يوقف البناء فوراً إذا نقص أي ملف)
+        script: |
+          echo "===== محتويات مجلد vendor ====="
+          ls -la www/vendor
+          echo "===== محتويات مجلد vendor/fonts ====="
+          ls -la www/vendor/fonts
+          for f in tailwind-built.css react.production.min.js react-dom.production.min.js babel.min.js lucide.js html2canvas.min.js jspdf.umd.min.js tajawal.css; do
+            path="www/vendor/$f"
+            if [ ! -s "$path" ]; then
+              echo "❌ فشل تنزيل الملف: $path (مفقود أو فارغ) - إيقاف البناء"
+              exit 1
+            else
+              size=$(stat -c%s "$path" 2>/dev/null || stat -f%z "$path")
+              echo "✅ $f - $size بايت"
+            fi
+          done
+          font_count=$(ls www/vendor/fonts/*.ttf 2>/dev/null | wc -l)
+          if [ "$font_count" -lt 4 ]; then
+            echo "❌ لم يتم تنزيل كل أوزان الخط (متوقع 4 ملفات ttf، الموجود: $font_count) - إيقاف البناء"
+            exit 1
+          fi
+          echo "✅ تم تنزيل $font_count ملف خط بنجاح"
+          echo "===== كل الملفات جاهزة، المتابعة للبناء ====="
+
+      - name: إضافة منصة أندرويد (أول مرة فقط)
+        script: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+      - name: توليد أيقونة التطبيق وشاشة البداية من صورة الغلاف
+        script: |
+          if [ -f "assets/icon.png" ]; then
+            npx @capacitor/assets generate --android
+          else
+            echo "لم يتم العثور على assets/icon.png - سيتم استخدام الأيقونة الافتراضية"
+          fi
+
+      - name: مزامنة ملفات الويب مع مشروع أندرويد
+        script: npx cap sync android
+
+      - name: بناء ملف APK
+        script: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+
+    artifacts:
+      - android/app/build/outputs/**/*.apk
